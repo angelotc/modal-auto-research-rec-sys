@@ -1,0 +1,17 @@
+[project]
+name = "auto-rec-sys"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "httpx>=0.28.1",
+  "modal",
+  "pandas",
+  "psycopg[binary]",
+  "pyarrow",
+  "python-dotenv",
+  "raindrop-ai>=0.0.50",
+  "wandb",
+]
+
+[tool.uv]
+package = false
