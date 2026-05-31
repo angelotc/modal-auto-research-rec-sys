@@ -120,11 +120,14 @@ quick comparison.
 
 ## Start Codex
 
-Start Codex CLI from the repo or this folder and give it the orchestrator:
+Start Codex CLI from this folder and give it the autonomous loop goal:
 
 ```text
-/goal Read orchestrator.md and continue the transformer-stage TIGER
-auto-research cycle. Use Modal runs for experiments and append result rows.
+/goal Read AGENTS.md, program.md, and orchestrator.md. Continue the auto-tiger
+loop from recent results.tsv: identify the current TIGER baseline, form one
+bounded hypothesis, edit train.py only unless the benchmark contract must
+change, run the Modal experiment, evaluate saved checkpoints, and append one
+result row.
 ```
 
 The upstream data and RQ-VAE stages already have kept results. New work should
