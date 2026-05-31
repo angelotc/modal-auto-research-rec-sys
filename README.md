@@ -12,6 +12,10 @@ The control plane is a Codex CLI research loop. Modal runs data exploration,
 cleansing, vector materialization, training, evaluation, and checkpoint-serving
 workloads.
 
+## Training Progress
+
+![TIGER training progress across experiments](output.png)
+
 ## Files
 
 - `program.md`: research contract, artifacts, metrics, and Modal role plan.
