@@ -1,136 +1,79 @@
 #!/usr/bin/env python3
-"""Read-only raw table snapshots for Modal-native auto-rec-sys research."""
+"""Fixed Modal artifact contract and input inspection for auto-tiger.
+
+This file is intentionally small. `train.py` owns the mutable TIGER experiment
+logic; this module owns the stable path assumptions and lightweight checks.
+"""
 
 from __future__ import annotations
 
 import argparse
-import csv
 import json
-import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import psycopg
+import pandas as pd
 
-TABLES = {
-    "listings": "SELECT * FROM listings",
-    "listing_views": "SELECT * FROM listing_views",
-}
+from config import ARTIFACT_ROOT, DEFAULT_CAMPAIGN_ID, DEFAULT_SFT_RUN_ID
 
 
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def run_root(artifact_root: Path, campaign_id: str, run_id: str) -> Path:
+    return artifact_root / campaign_id / run_id
 
 
-def require_database_url() -> str:
-    database_url = os.environ.get("DATABASE_URL")
-    if not database_url:
-        raise RuntimeError("DATABASE_URL is required to snapshot auto-rec-sys tables.")
-    return database_url
-
-
-def dataset_dir(output_root: Path, campaign_id: str, dataset_id: str) -> Path:
-    return output_root / campaign_id / "datasets" / dataset_id
-
-
-def write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n",
-        encoding="utf-8",
-    )
-
-
-def snapshot_table(
-    connection: psycopg.Connection[Any], *, table: str, query: str, output_path: Path
-) -> dict[str, Any]:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    row_count = 0
-    with connection.cursor(name=f"auto_rec_sys_{table}_cursor") as cursor:
-        cursor.itersize = 10000
-        cursor.execute(query)
-        columns = [column.name for column in cursor.description or []]
-        with output_path.open("w", newline="", encoding="utf-8") as csv_file:
-            writer = csv.writer(csv_file)
-            writer.writerow(columns)
-            for row in cursor:
-                writer.writerow(row)
-                row_count += 1
+def sft_inputs(artifact_root: Path, campaign_id: str, sft_run_id: str) -> dict[str, Path]:
+    root = run_root(artifact_root, campaign_id, sft_run_id)
     return {
-        "table": table,
-        "query": query,
-        "csv_path": str(output_path),
-        "columns": columns,
-        "row_count": row_count,
+        "train_jsonl": root / "datasets" / "llm_sft" / "history_next_train.jsonl",
+        "eval_jsonl": root / "datasets" / "eval" / "history_next_eval.jsonl",
+        "catalog_semantic_ids": root / "datasets" / "eval" / "catalog_semantic_ids.parquet",
     }
 
 
-def snapshot_tables(*, campaign_id: str, dataset_id: str, output_root: Path) -> dict[str, Any]:
-    root = dataset_dir(output_root, campaign_id, dataset_id)
-    raw_dir = root / "raw"
-    started_at = utc_now()
+def count_jsonl(path: Path) -> int:
+    with path.open(encoding="utf-8") as handle:
+        return sum(1 for _line in handle)
 
-    with psycopg.connect(require_database_url()) as connection:
-        table_metadata = {
-            table: snapshot_table(
-                connection,
-                table=table,
-                query=query,
-                output_path=raw_dir / f"{table}.csv",
-            )
-            for table, query in TABLES.items()
+
+def inspect_inputs(artifact_root: Path, campaign_id: str, sft_run_id: str) -> dict[str, Any]:
+    paths = sft_inputs(artifact_root, campaign_id, sft_run_id)
+    missing = [str(path) for path in paths.values() if not path.exists()]
+    if missing:
+        return {
+            "ok": False,
+            "artifact_root": str(artifact_root),
+            "campaign_id": campaign_id,
+            "sft_run_id": sft_run_id,
+            "missing": missing,
+            "paths": {key: str(path) for key, path in paths.items()},
         }
 
-    metadata_path = raw_dir / "table_metadata.json"
-    write_json(metadata_path, table_metadata)
-    manifest = {
-        "campaign_id": campaign_id,
-        "dataset_id": dataset_id,
-        "stage": "raw_table_snapshot",
-        "started_at": started_at,
-        "finished_at": utc_now(),
-        "read_only": True,
-        "tables": table_metadata,
-        "artifacts": {
-            "table_metadata": str(metadata_path),
-            "raw_csvs": {
-                table: metadata["csv_path"] for table, metadata in table_metadata.items()
-            },
-        },
-        "next_stage": "Codex-authored Modal post-processing functions",
-    }
-    manifest_path = root / "manifest.json"
-    write_json(manifest_path, manifest)
+    catalog = pd.read_parquet(paths["catalog_semantic_ids"], columns=["semantic_id"])
     return {
-        "dataset_dir": str(root),
-        "manifest_path": str(manifest_path),
-        "tables": {
-            table: {
-                "row_count": metadata["row_count"],
-                "csv_path": metadata["csv_path"],
-            }
-            for table, metadata in table_metadata.items()
+        "ok": True,
+        "artifact_root": str(artifact_root),
+        "campaign_id": campaign_id,
+        "sft_run_id": sft_run_id,
+        "paths": {key: str(path) for key, path in paths.items()},
+        "counts": {
+            "train_jsonl_lines": count_jsonl(paths["train_jsonl"]),
+            "eval_jsonl_lines": count_jsonl(paths["eval_jsonl"]),
+            "catalog_semantic_ids": int(catalog["semantic_id"].astype(str).nunique()),
         },
     }
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--campaign-id", required=True)
-    parser.add_argument("--dataset-id", required=True)
-    parser.add_argument("--output-root", type=Path, default=Path("artifacts"))
+    parser.add_argument("--artifact-root", type=Path, default=ARTIFACT_ROOT)
+    parser.add_argument("--campaign-id", default=DEFAULT_CAMPAIGN_ID)
+    parser.add_argument("--sft-run-id", default=DEFAULT_SFT_RUN_ID)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    result = snapshot_tables(
-        campaign_id=args.campaign_id,
-        dataset_id=args.dataset_id,
-        output_root=args.output_root,
-    )
-    print(json.dumps(result, indent=2, sort_keys=True))
+    print(json.dumps(inspect_inputs(args.artifact_root, args.campaign_id, args.sft_run_id), indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

@@ -1,22 +1,24 @@
-# auto-rec-sys Agent Instructions
+# auto-tiger Agent Instructions
 
 Read `program.md` before changing this workspace.
 
-- Use `orchestrator.md` for the principal-investigator loop and `agents/*.md`
-  for focused worker briefs.
-- Treat `modal_app.py` and `prepare.py` as a starting Modal research workbench.
-  Add the smallest new Modal function that answers the next concrete data,
-  training, evaluation, or inspection question.
-- Use Modal runs, run manifests, dataset IDs, and checkpoint artifacts as
-  experiment lineage. Do not use git commit/revert cycles as the research
-  ledger.
-- Keep raw snapshots immutable. A new data-cleaning hypothesis creates a new
-  dataset version and a new result row.
-- Keep data execution Modal-native. Codex should receive summaries, small
-  samples, metrics, and artifact paths rather than moving raw training data
-  locally.
-- Do not mutate production DB data. Research DB access is for snapshot reads.
-- Gate expensive LLM training on prepared data plus a successful semantic-ID
-  assignment result.
-- Keep workers focused on one hypothesis and one stage family unless the
-  orchestrator explicitly assigns an end-to-end baseline.
+- This repo is an autonomous TIGER research harness modeled after
+  `karpathy/autoresearch`, adapted for Modal-native Nipponhomes artifacts.
+- Treat `prepare.py` as the fixed data/evaluation contract. Do not edit it
+  during an experiment unless the human explicitly changes the benchmark.
+- Treat `train.py` as the main editable experiment file. Architecture,
+  optimizer, training knobs, reranking, and checkpoint logic are fair game.
+- Keep data execution Modal-native. Data files are expected to live in the
+  existing Modal Volume, not in this checkout.
+- Use Modal run IDs, manifests, checkpoint artifacts, and `results.tsv` as the
+  experiment ledger. Do not use git reset/commit cycles as the research ledger.
+- Log compact experiment summaries locally to `results.tsv`; use
+  `log_experiment.py` or `modal_app.py::log_experiment_remote` for Deeplake
+  when credentials are only available through Modal secrets.
+- Preserve the full-catalog constrained evaluation as the primary acceptance
+  metric. Sampled metrics are diagnostics only.
+- Keep one hypothesis per run. Prefer a small, reviewable change to `train.py`
+  over broad rewrites.
+- Do not mutate production DB data. This project consumes prepared Modal
+  artifacts only.
+

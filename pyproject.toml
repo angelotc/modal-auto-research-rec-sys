@@ -1,16 +1,16 @@
 [project]
-name = "auto-rec-sys"
+name = "auto-tiger"
 version = "0.1.0"
+description = "Modal-native autoresearch-style TIGER experiment harness"
 requires-python = ">=3.11"
 dependencies = [
-  "httpx>=0.28.1",
+  "deeplake",
+  "matplotlib",
   "modal",
+  "numpy",
   "pandas",
-  "psycopg[binary]",
   "pyarrow",
-  "python-dotenv",
-  "raindrop-ai>=0.0.50",
-  "wandb",
+  "torch",
 ]
 
 [tool.uv]

@@ -1,424 +1,315 @@
 #!/usr/bin/env python3
-"""Starting Modal workbench for auto-rec-sys.
-
-Codex should extend this app with the next small data, model, evaluation, or
-inspection function needed by the research loop.
-"""
+"""Modal launch surface for auto-tiger experiments."""
 
 from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import modal
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
+TRAIN_SCRIPT = SCRIPT_DIR / "train.py"
 PREPARE_SCRIPT = SCRIPT_DIR / "prepare.py"
-WANDB_LOGGING_SCRIPT = SCRIPT_DIR / "wandb_logging.py"
-RQVAE_ABLATION_SCRIPT = SCRIPT_DIR / "rqvae_ablation.py"
+LOG_EXPERIMENT_SCRIPT = SCRIPT_DIR / "log_experiment.py"
 
-APP_NAME = os.environ.get("AUTO_REC_SYS_MODAL_APP_NAME", "nipponhomes-auto-rec-sys")
-VOLUME_NAME = os.environ.get("AUTO_REC_SYS_MODAL_VOLUME_NAME", "nipponhomes-auto-rec-sys")
-DB_SECRET_NAME = os.environ.get("AUTO_REC_SYS_DB_SECRET_NAME", "nipponhomes-auto-rec-sys-db")
-RUNTIME_SECRET_NAME = os.environ.get("AUTO_REC_SYS_RUNTIME_SECRET_NAME", "custom-secret")
-
-APP_DIR = "/app/auto-rec-sys"
-VOLUME_PATH = "/vol"
-ARTIFACT_ROOT = f"{VOLUME_PATH}/auto-rec-sys"
+try:
+    from config import (
+        APP_DIR,
+        APP_NAME,
+        ARTIFACT_ROOT,
+        DEFAULT_CAMPAIGN_ID,
+        DEFAULT_GPU,
+        DEFAULT_INSPECT_MEMORY_MB,
+        DEFAULT_SFT_RUN_ID,
+        DEFAULT_TRAIN_MEMORY_MB,
+        RUNTIME_SECRET_NAME,
+        VOLUME_NAME,
+        VOLUME_PATH,
+    )
+except ModuleNotFoundError:
+    # Modal imports this entrypoint remotely before image-local files are
+    # available. Keep these fallbacks in sync with config.py.
+    APP_NAME = os.environ.get("AUTO_TIGER_MODAL_APP_NAME", "nipponhomes-auto-tiger")
+    VOLUME_NAME = os.environ.get("AUTO_TIGER_MODAL_VOLUME_NAME", "nipponhomes-auto-rec-sys")
+    RUNTIME_SECRET_NAME = os.environ.get("AUTO_TIGER_RUNTIME_SECRET_NAME", "custom-secret")
+    APP_DIR = os.environ.get("AUTO_TIGER_APP_DIR", "/app/auto-tiger")
+    VOLUME_PATH = os.environ.get("AUTO_TIGER_VOLUME_PATH", "/vol")
+    ARTIFACT_ROOT = Path(os.environ.get("AUTO_TIGER_ARTIFACT_ROOT", f"{VOLUME_PATH}/auto-rec-sys"))
+    DEFAULT_CAMPAIGN_ID = os.environ.get("AUTO_TIGER_DEFAULT_CAMPAIGN_ID", "demo")
+    DEFAULT_SFT_RUN_ID = os.environ.get(
+        "AUTO_TIGER_DEFAULT_SFT_RUN_ID",
+        "sft-raw-tables-001-eugene-curriculum-002",
+    )
+    DEFAULT_GPU = os.environ.get("AUTO_TIGER_GPU", "T4")
+    DEFAULT_TRAIN_MEMORY_MB = int(os.environ.get("AUTO_TIGER_MEMORY_MB", "32768"))
+    DEFAULT_INSPECT_MEMORY_MB = int(os.environ.get("AUTO_TIGER_INSPECT_MEMORY_MB", "8192"))
 
 app = modal.App(APP_NAME)
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
-db_secret = modal.Secret.from_name(DB_SECRET_NAME)
-runtime_secret = modal.Secret.from_name(RUNTIME_SECRET_NAME)
-wandb_secret = modal.Secret.from_name(DB_SECRET_NAME)
+runtime_secret = modal.Secret.from_name(
+    RUNTIME_SECRET_NAME,
+    required_keys=["DEEPLAKE_API_KEY"],
+)
 
-prepare_image = (
+tiger_image = (
     modal.Image.debian_slim(python_version="3.11")
-    .uv_pip_install("psycopg[binary]")
+    .uv_pip_install("numpy", "pandas", "pyarrow", "torch")
+    .add_local_file(TRAIN_SCRIPT, f"{APP_DIR}/train.py")
     .add_local_file(PREPARE_SCRIPT, f"{APP_DIR}/prepare.py")
+    .add_local_file(SCRIPT_DIR / "config.py", f"{APP_DIR}/config.py")
 )
 
-train_image = (
+ledger_image = (
     modal.Image.debian_slim(python_version="3.11")
-    .uv_pip_install("wandb")
-    .add_local_file(WANDB_LOGGING_SCRIPT, f"{APP_DIR}/wandb_logging.py")
-)
-
-rqvae_image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .uv_pip_install("numpy", "pandas", "pyarrow", "torch", "wandb")
-    .add_local_file(RQVAE_ABLATION_SCRIPT, f"{APP_DIR}/rqvae_ablation.py")
-    .add_local_file(WANDB_LOGGING_SCRIPT, f"{APP_DIR}/wandb_logging.py")
+    .uv_pip_install("deeplake")
+    .add_local_file(LOG_EXPERIMENT_SCRIPT, f"{APP_DIR}/log_experiment.py")
+    .add_local_file(SCRIPT_DIR / "config.py", f"{APP_DIR}/config.py")
 )
 
 
 @app.function(
-    image=prepare_image,
-    cpu=4.0,
-    memory=16384,
-    timeout=60 * 60,
+    image=tiger_image,
+    cpu=2.0,
+    memory=DEFAULT_INSPECT_MEMORY_MB,
+    timeout=10 * 60,
     volumes={VOLUME_PATH: volume},
-    secrets=[db_secret],
 )
-def prepare_tables(campaign_id: str, dataset_id: str) -> dict:
-    import subprocess
-    import sys
-
+def inspect_inputs(
+    campaign_id: str = DEFAULT_CAMPAIGN_ID,
+    sft_run_id: str = DEFAULT_SFT_RUN_ID,
+) -> dict:
     result = subprocess.run(
         [
             sys.executable,
             f"{APP_DIR}/prepare.py",
+            "--artifact-root",
+            str(ARTIFACT_ROOT),
             "--campaign-id",
             campaign_id,
-            "--dataset-id",
-            dataset_id,
-            "--output-root",
-            ARTIFACT_ROOT,
+            "--sft-run-id",
+            sft_run_id,
         ],
-        check=True,
         capture_output=True,
         text=True,
     )
+    if result.returncode:
+        raise RuntimeError(
+            "prepare.py input inspection failed "
+            f"with exit code {result.returncode}:\n{result.stderr or result.stdout}"
+        )
     print(result.stdout)
     if result.stderr:
         print(result.stderr)
-    volume.commit()
     return json.loads(result.stdout)
 
 
 @app.function(
-    image=rqvae_image,
-    gpu="T4",
+    image=tiger_image,
+    gpu=DEFAULT_GPU,
     cpu=4.0,
-    memory=16384,
-    timeout=8 * 60,
+    memory=DEFAULT_TRAIN_MEMORY_MB,
+    timeout=4 * 60 * 60,
     volumes={VOLUME_PATH: volume},
-    secrets=[wandb_secret],
 )
-def train_rqvae_ablation(
+def train_tiger_experiment(
     campaign_id: str,
     dataset_id: str,
-    ablation: str,
+    sft_run_id: str,
     run_id: str,
-    max_seconds: int = 300,
-    seed: int = 17,
-    rq_levels: int = 4,
-    codebook_size: int = 64,
-    learning_rate: float = 2e-3,
-    batch_size: int = 512,
-    use_kmeans_init: bool = False,
+    max_history_items: int = 20,
+    hidden_size: int = 128,
+    layers: int = 4,
+    heads: int = 4,
+    feedforward_size: int = 1024,
+    dropout: float = 0.1,
+    max_steps: int = 400,
+    checkpoint_steps: int = 100,
+    max_minutes: float = 0.0,
+    resume_checkpoint: str = "",
+    batch_size: int = 256,
+    beam_size: int = 10,
+    rerank_prefix_bonus: float = 0.0,
+    rerank_prefix_depth: int = 0,
+    rerank_recency_mode: str = "inverse",
+    rerank_popularity_penalty: float = 0.0,
+    learning_rate: float = 0.001,
+    label_smoothing: float = 0.0,
+    item_loss_weight: float = 0.0,
+    item_loss_negatives: int = 256,
+    item_loss_temperature: float = 0.1,
+    weight_decay: float = 0.00001,
+    max_grad_norm: float = 1.0,
+    seed: int = 42,
+    use_sid_position_embeddings: bool = False,
 ) -> dict:
-    import subprocess
-    import sys
-
     command = [
         sys.executable,
-        f"{APP_DIR}/rqvae_ablation.py",
+        f"{APP_DIR}/train.py",
+        "--artifact-root",
+        str(ARTIFACT_ROOT),
         "--campaign-id",
         campaign_id,
         "--dataset-id",
         dataset_id,
-        "--ablation",
-        ablation,
+        "--sft-run-id",
+        sft_run_id,
         "--run-id",
         run_id,
-        "--output-root",
-        ARTIFACT_ROOT,
-        "--max-seconds",
-        str(max_seconds),
-        "--seed",
-        str(seed),
-        "--rq-levels",
-        str(rq_levels),
-        "--codebook-size",
-        str(codebook_size),
-        "--learning-rate",
-        str(learning_rate),
+        "--max-history-items",
+        str(max_history_items),
+        "--hidden-size",
+        str(hidden_size),
+        "--layers",
+        str(layers),
+        "--heads",
+        str(heads),
+        "--feedforward-size",
+        str(feedforward_size),
+        "--dropout",
+        str(dropout),
+        "--max-steps",
+        str(max_steps),
+        "--checkpoint-steps",
+        str(checkpoint_steps),
+        "--max-minutes",
+        str(max_minutes),
         "--batch-size",
         str(batch_size),
+        "--beam-size",
+        str(beam_size),
+        "--rerank-prefix-bonus",
+        str(rerank_prefix_bonus),
+        "--rerank-prefix-depth",
+        str(rerank_prefix_depth),
+        "--rerank-recency-mode",
+        rerank_recency_mode,
+        "--rerank-popularity-penalty",
+        str(rerank_popularity_penalty),
+        "--learning-rate",
+        str(learning_rate),
+        "--label-smoothing",
+        str(label_smoothing),
+        "--item-loss-weight",
+        str(item_loss_weight),
+        "--item-loss-negatives",
+        str(item_loss_negatives),
+        "--item-loss-temperature",
+        str(item_loss_temperature),
+        "--weight-decay",
+        str(weight_decay),
+        "--max-grad-norm",
+        str(max_grad_norm),
+        "--seed",
+        str(seed),
     ]
-    if use_kmeans_init:
-        command.append("--use-kmeans-init")
-
+    if use_sid_position_embeddings:
+        command.append("--use-sid-position-embeddings")
+    if resume_checkpoint:
+        command.extend(["--resume-checkpoint", resume_checkpoint])
     result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(
+            "train.py failed "
+            f"with exit code {result.returncode}:\n{result.stderr or result.stdout}"
+        )
     print(result.stdout)
     if result.stderr:
         print(result.stderr)
-    if result.returncode != 0:
-        volume.commit()
-        return {
-            "run_id": run_id,
-            "dataset_id": dataset_id,
-            "ablation": ablation,
-            "status": "crash",
-            "decision": "crash",
-            "artifact_uri": f"{ARTIFACT_ROOT}/{campaign_id}/runs/{run_id}",
-            "error": {
-                "returncode": result.returncode,
-                "stdout_tail": result.stdout[-4000:],
-                "stderr_tail": result.stderr[-4000:],
-            },
-        }
     volume.commit()
-    for line in reversed(result.stdout.splitlines()):
-        if line.startswith("RESULT_JSON\t"):
-            return json.loads(line.split("\t", 1)[1])
     return json.loads(result.stdout)
 
 
 @app.function(
-    image=rqvae_image,
-    cpu=2.0,
-    memory=8192,
-    timeout=10 * 60,
+    image=tiger_image,
+    gpu=DEFAULT_GPU,
+    cpu=4.0,
+    memory=DEFAULT_TRAIN_MEMORY_MB,
+    timeout=4 * 60 * 60,
     volumes={VOLUME_PATH: volume},
 )
-def inspect_listing_fields(campaign_id: str, dataset_id: str, sample_values: int = 5) -> dict:
-    from pathlib import Path
-
-    import pandas as pd
-
-    dataset_root = Path(ARTIFACT_ROOT) / campaign_id / "datasets" / dataset_id
-    raw_listings = dataset_root / "raw" / "listings.csv"
-    if not raw_listings.exists():
-        raise FileNotFoundError(f"Missing raw snapshot artifact: {raw_listings}")
-
-    frame = pd.read_csv(raw_listings, low_memory=False)
-    profile = {
-        "campaign_id": campaign_id,
-        "dataset_id": dataset_id,
-        "row_count": int(len(frame)),
-        "column_count": int(len(frame.columns)),
-        "columns": list(frame.columns),
-        "dtypes": {column: str(dtype) for column, dtype in frame.dtypes.items()},
-        "non_null": frame.notna().sum().astype(int).to_dict(),
-        "null_count": frame.isna().sum().astype(int).to_dict(),
-        "sample_values": {
-            column: frame[column].dropna().astype(str).head(sample_values).tolist()
-            for column in frame.columns
-        },
-    }
-    profile_path = dataset_root / "profiles" / "listing_fields.json"
-    profile_path.parent.mkdir(parents=True, exist_ok=True)
-    profile_path.write_text(json.dumps(profile, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+def report_tiger_saved_checkpoints(
+    campaign_id: str,
+    dataset_id: str,
+    sft_run_id: str,
+    run_id: str,
+    checkpoint_run_id: str = "",
+    report_checkpoint_step: int = 0,
+    beam_size: int = 10,
+    rerank_prefix_bonus: float = 0.0,
+    rerank_prefix_depth: int = 0,
+    rerank_recency_mode: str = "inverse",
+    rerank_popularity_penalty: float = 0.0,
+) -> dict:
+    command = [
+            sys.executable,
+            f"{APP_DIR}/train.py",
+            "--artifact-root",
+            str(ARTIFACT_ROOT),
+            "--campaign-id",
+            campaign_id,
+            "--dataset-id",
+            dataset_id,
+            "--sft-run-id",
+            sft_run_id,
+            "--run-id",
+            run_id,
+            "--beam-size",
+            str(beam_size),
+            "--rerank-prefix-bonus",
+            str(rerank_prefix_bonus),
+            "--rerank-prefix-depth",
+            str(rerank_prefix_depth),
+            "--rerank-recency-mode",
+            rerank_recency_mode,
+            "--rerank-popularity-penalty",
+            str(rerank_popularity_penalty),
+            "--report-saved-checkpoints",
+        ]
+    if checkpoint_run_id:
+        command.extend(["--checkpoint-run-id", checkpoint_run_id])
+    if report_checkpoint_step:
+        command.extend(["--report-checkpoint-step", str(report_checkpoint_step)])
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        raise RuntimeError(
+            "train.py saved-checkpoint report failed "
+            f"with exit code {result.returncode}:\n{result.stderr or result.stdout}"
+        )
+    print(result.stdout)
+    if result.stderr:
+        print(result.stderr)
     volume.commit()
-    return {"profile_path": str(profile_path), **profile}
+    return json.loads(result.stdout)
 
 
-@app.local_entrypoint()
-def main(campaign_id: str = "demo", dataset_id: str = "raw-tables-001") -> None:
-    result = prepare_tables.remote(campaign_id=campaign_id, dataset_id=dataset_id)
-    print(f"Prepared raw Modal tables: {result}")
-
-
-@app.local_entrypoint()
-def rqvae_sweep(
-    campaign_id: str = "demo",
-    dataset_id: str = "raw-tables-001",
-    run_prefix: str = "rqvae-ablation",
-    max_seconds: int = 300,
-) -> None:
-    from datetime import datetime, timezone
-
-    ablations = ["core_metadata", "no_price", "no_location", "property_shape", "fees_and_price"]
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    results = []
-    for ablation in ablations:
-        run_id = f"{run_prefix}-{ablation}-{stamp}"
-        result = train_rqvae_ablation.remote(
-            campaign_id=campaign_id,
-            dataset_id=dataset_id,
-            ablation=ablation,
-            run_id=run_id,
-            max_seconds=max_seconds,
-        )
-        results.append(result)
-        metrics = result.get("metrics", {})
-        print(
-            "\t".join(
-                [
-                    result["run_id"],
-                    ablation,
-                    str(metrics.get("item_count", "")),
-                    str(metrics.get("vector_dim", "")),
-                    str(metrics.get("training_steps_completed", "")),
-                    f"{metrics.get('validation_reconstruction_loss', float('nan')):.6f}",
-                    f"{metrics.get('collision_free_fraction', float('nan')):.4f}",
-                    result["decision"],
-                    result["artifact_uri"],
-                ]
-            )
-        )
-    print(json.dumps(results, indent=2, sort_keys=True))
-
-
-@app.local_entrypoint()
-def rqvae_core_tune(
-    campaign_id: str = "demo",
-    dataset_id: str = "raw-tables-001",
-    run_prefix: str = "rqvae-core-tune",
-    max_seconds: int = 300,
-) -> None:
-    from datetime import datetime, timezone
-
-    configs = [
-        {"suffix": "core_c128_l4", "codebook_size": 128, "rq_levels": 4, "use_kmeans_init": False},
-        {"suffix": "core_c256_l4", "codebook_size": 256, "rq_levels": 4, "use_kmeans_init": False},
-        {"suffix": "core_c128_l3", "codebook_size": 128, "rq_levels": 3, "use_kmeans_init": False},
-        {"suffix": "core_c256_l3", "codebook_size": 256, "rq_levels": 3, "use_kmeans_init": False},
-    ]
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    results = []
-    for config in configs:
-        run_id = f"{run_prefix}-{config['suffix']}-{stamp}"
-        result = train_rqvae_ablation.remote(
-            campaign_id=campaign_id,
-            dataset_id=dataset_id,
-            ablation="core_metadata",
-            run_id=run_id,
-            max_seconds=max_seconds,
-            codebook_size=config["codebook_size"],
-            rq_levels=config["rq_levels"],
-            use_kmeans_init=config["use_kmeans_init"],
-        )
-        results.append(result)
-        metrics = result.get("metrics", {})
-        print(
-            "\t".join(
-                [
-                    result["run_id"],
-                    result.get("dataset_id", dataset_id),
-                    "core_metadata",
-                    str(config["codebook_size"]),
-                    str(config["rq_levels"]),
-                    str(config["use_kmeans_init"]).lower(),
-                    str(metrics.get("training_steps_completed", "")),
-                    f"{metrics.get('validation_reconstruction_loss', float('nan')):.6f}",
-                    f"{metrics.get('validation_total_loss', float('nan')):.6f}",
-                    f"{metrics.get('collision_free_fraction', float('nan')):.6f}",
-                    str(metrics.get("prefix_spread_l2", "")),
-                    str(metrics.get("max_prefix_size_l2", "")),
-                    result.get("decision", ""),
-                    result.get("artifact_uri", ""),
-                ]
-            )
-        )
-    print("RESULT_JSON\t" + json.dumps(results, indent=2, sort_keys=True))
-
-
-@app.local_entrypoint()
-def rqvae_feature_source_sweep(
-    campaign_id: str = "demo",
-    dataset_id: str = "raw-tables-001",
-    run_prefix: str = "rqvae-feature-src",
-    max_seconds: int = 300,
-) -> None:
-    from datetime import datetime, timezone
-
-    hypothesis = (
-        "With codebook_size=256 and rq_levels=4 fixed, full core metadata quality is driven by "
-        "which feature source family supplies collision-separating signal."
+@app.function(
+    image=ledger_image,
+    timeout=10 * 60,
+    secrets=[runtime_secret],
+)
+def log_experiment_remote(*args: str) -> str:
+    if not args or args[0] not in {"log", "recent"}:
+        raise ValueError("args must start with a supported log_experiment.py command")
+    result = subprocess.run(
+        [sys.executable, f"{APP_DIR}/log_experiment.py", *args],
+        capture_output=True,
+        text=True,
     )
-    configs = [
-        {
-            "suffix": "structured",
-            "ablation": "structured_metadata",
-            "codebook_size": 256,
-            "rq_levels": 4,
-            "use_kmeans_init": False,
-        },
-        {
-            "suffix": "context",
-            "ablation": "context_metadata",
-            "codebook_size": 256,
-            "rq_levels": 4,
-            "use_kmeans_init": False,
-        },
-        {
-            "suffix": "price_shape",
-            "ablation": "price_shape_metadata",
-            "codebook_size": 256,
-            "rq_levels": 4,
-            "use_kmeans_init": False,
-        },
-    ]
-    print(f"HYPOTHESIS\t{hypothesis}")
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    results = []
-    for config in configs:
-        run_id = f"{run_prefix}-{config['suffix']}-{stamp}"
-        result = train_rqvae_ablation.remote(
-            campaign_id=campaign_id,
-            dataset_id=dataset_id,
-            ablation=config["ablation"],
-            run_id=run_id,
-            max_seconds=max_seconds,
-            codebook_size=config["codebook_size"],
-            rq_levels=config["rq_levels"],
-            use_kmeans_init=config["use_kmeans_init"],
+    if result.returncode:
+        raise RuntimeError(
+            "log_experiment.py failed "
+            f"with exit code {result.returncode}:\n{result.stderr or result.stdout}"
         )
-        results.append(result)
-        metrics = result.get("metrics", {})
-        print(
-            "\t".join(
-                [
-                    result["run_id"],
-                    result.get("dataset_id", dataset_id),
-                    config["ablation"],
-                    str(config["codebook_size"]),
-                    str(config["rq_levels"]),
-                    str(config["use_kmeans_init"]).lower(),
-                    str(metrics.get("item_count", "")),
-                    str(metrics.get("vector_dim", "")),
-                    str(metrics.get("training_steps_completed", "")),
-                    f"{metrics.get('validation_reconstruction_loss', float('nan')):.6f}",
-                    f"{metrics.get('validation_total_loss', float('nan')):.6f}",
-                    f"{metrics.get('collision_free_fraction', float('nan')):.6f}",
-                    str(metrics.get("prefix_spread_l2", "")),
-                    str(metrics.get("max_prefix_size_l2", "")),
-                    result.get("decision", ""),
-                    result.get("artifact_uri", ""),
-                ]
-            )
-        )
-    print("RESULT_JSON\t" + json.dumps(results, indent=2, sort_keys=True))
-
-
-@app.local_entrypoint()
-def rqvae_one(
-    campaign_id: str = "demo",
-    dataset_id: str = "raw-tables-001",
-    ablation: str = "core_metadata",
-    run_id: str = "",
-    max_seconds: int = 300,
-    codebook_size: int = 256,
-    rq_levels: int = 4,
-    learning_rate: float = 2e-3,
-    batch_size: int = 512,
-    use_kmeans_init: bool = False,
-) -> None:
-    from datetime import datetime, timezone
-
-    if not run_id:
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        run_id = f"rqvae-one-{ablation}-{stamp}"
-    result = train_rqvae_ablation.remote(
-        campaign_id=campaign_id,
-        dataset_id=dataset_id,
-        ablation=ablation,
-        run_id=run_id,
-        max_seconds=max_seconds,
-        codebook_size=codebook_size,
-        rq_levels=rq_levels,
-        learning_rate=learning_rate,
-        batch_size=batch_size,
-        use_kmeans_init=use_kmeans_init,
-    )
-    print("RESULT_JSON\t" + json.dumps(result, indent=2, sort_keys=True))
-
-
-@app.local_entrypoint()
-def fields(campaign_id: str = "demo", dataset_id: str = "raw-tables-001") -> None:
-    result = inspect_listing_fields.remote(campaign_id=campaign_id, dataset_id=dataset_id)
-    print(json.dumps(result, indent=2, sort_keys=True))
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr)
+    return result.stdout
